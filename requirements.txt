@@ -3,4 +3,3 @@ Pillow
 piexif
 folium
 streamlit-folium
-zipfile
