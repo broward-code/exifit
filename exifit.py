@@ -5,23 +5,28 @@ import io
 import folium
 from streamlit_folium import st_folium
 
-# --- INITIALIZE SESSION STATE ---
-if 'coords' not in st.session_state:
-    st.session_state.coords = {"lat": 0.0, "lon": 0.0}
+# --- 1. SESSION STATE MANAGEMENT ---
+# This keeps the coordinates synced between the map and the text fields
+if 'lat' not in st.session_state:
+    st.session_state.lat = 0.0
+if 'lon' not in st.session_state:
+    st.session_state.lon = 0.0
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
 def reset_app():
-    st.session_state.coords = {"lat": 0.0, "lon": 0.0}
+    st.session_state.lat = 0.0
+    st.session_state.lon = 0.0
     st.session_state.uploader_key += 1
 
-# --- UTILITIES ---
-def decimal_to_dms(decimal):
-    abs_dec = abs(decimal)
-    d = int(abs_dec)
-    m = int((abs_dec - d) * 60)
-    s = (abs_dec - d - m/60) * 3600
-    return d, m, round(s, 3)
+# --- 2. UTILITIES ---
+def decimal_to_exif_rational(val):
+    """Converts decimal to EXIF rational with 3-decimal precision."""
+    abs_val = abs(val)
+    d = int(abs_val)
+    m = int((abs_val - d) * 60)
+    s = (abs_val - d - m/60) * 3600
+    return ((d, 1), (m, 1), (int(round(s * 1000)), 1000))
 
 def parse_exif_gps(gps_data):
     def to_float(num_tuple):
@@ -34,70 +39,86 @@ def parse_exif_gps(gps_data):
         return lat, lon
     except: return 0.0, 0.0
 
-# --- APP UI ---
-st.set_page_config(layout="wide", page_title="Chisheu EXIF Tool")
+# --- 3. APP UI ---
+st.set_page_config(layout="wide", page_title="Chisheu EXIF Precision Tool")
 
 with st.sidebar:
     st.title("⚙️ Controls")
     st.button("🔄 Reset / New Photo", on_click=reset_app, use_container_width=True)
+    st.info("Tip: Enter coordinates manually to 'teleport' the pin, then drag the pin to fine-tune.")
 
-st.title("📸 Interactive GPS Editor")
+st.title("📸 Interactive GPS Fine-Tuner")
 
-uploaded_file = st.file_uploader("Choose a JPEG", type=["jpg", "jpeg"], key=f"up_{st.session_state.uploader_key}")
+uploaded_file = st.file_uploader("Upload JPEG", type=["jpg", "jpeg"], key=f"up_{st.session_state.uploader_key}")
 
 if uploaded_file:
     img = Image.open(uploaded_file)
-    exif_dict = piexif.load(img.info.get('exif', b''))
     
-    # Initialize coordinates from file if not already set
-    if st.session_state.coords["lat"] == 0.0:
-        init_lat, init_lon = parse_exif_gps(exif_dict.get("GPS", {}))
-        st.session_state.coords = {"lat": init_lat, "lon": init_lon}
+    # Initialize state from file only if state is currently zero
+    if st.session_state.lat == 0.0 and st.session_state.lon == 0.0:
+        exif_dict = piexif.load(img.info.get('exif', b''))
+        file_lat, file_lon = parse_exif_gps(exif_dict.get("GPS", {}))
+        st.session_state.lat = file_lat
+        st.session_state.lon = file_lon
 
-    col_left, col_right = st.columns([1, 1])
+    col_map, col_ctrl = st.columns([1.5, 1])
 
-    with col_left:
-        st.image(img, use_container_width=True)
-        st.subheader("📍 Drag pin to set location")
+    with col_ctrl:
+        st.subheader("Manual Coordinate Entry")
+        # Manual Inputs update the Session State immediately
+        lat_input = st.number_input("Latitude", value=st.session_state.lat, format="%.6f", key="manual_lat")
+        lon_input = st.number_input("Longitude", value=st.session_state.lon, format="%.6f", key="manual_lon")
         
-        # 1. Create Map
-        m = folium.Map(location=[st.session_state.coords["lat"], st.session_state.coords["lon"]], zoom_start=15)
+        # If the user typed something new, update the global state
+        if lat_input != st.session_state.lat or lon_input != st.session_state.lon:
+            st.session_state.lat = lat_input
+            st.session_state.lon = lon_input
+            st.rerun()
+
+        st.image(img, use_container_width=True, caption="Preview")
+
+    with col_map:
+        st.subheader("Map Fine-Tuning")
+        st.caption("Drag the blue marker to adjust placement precisely.")
         
-        # 2. Add Draggable Marker
+        # Create map centered on current state
+        m = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=16)
+        
+        # Add the draggable marker
         marker = folium.Marker(
-            [st.session_state.coords["lat"], st.session_state.coords["lon"]],
+            [st.session_state.lat, st.session_state.lon],
             draggable=True,
-            popup="Drag me!"
+            icon=folium.Icon(color='blue', icon='info-sign')
         )
         marker.add_to(m)
         
-        # 3. Capture Map Output
-        map_data = st_folium(m, height=400, width=700, key="interactive_map")
-        
-        # 4. Sync Dragged Data back to Session State
-        if map_data and map_data.get("last_object_clicked_tooltip") is None: # Check if it's a drag event
-            if map_data.get("last_object_clicked"):
-                new_lat = map_data["last_object_clicked"]["lat"]
-                new_lon = map_data["last_object_clicked"]["lng"]
-                # Optional: Update state here if you want fields to move with the pin
-    
-    with col_right:
-        st.subheader("Coordinate Refinement")
-        mode = st.radio("Entry Method", ["Decimal", "DMS"], horizontal=True)
-        
-        if mode == "Decimal":
-            final_lat = st.number_input("Lat", value=st.session_state.coords["lat"], format="%.6f")
-            final_lon = st.number_input("Lon", value=st.session_state.coords["lon"], format="%.6f")
-        else:
-            d_lat, m_lat, s_lat = decimal_to_dms(st.session_state.coords["lat"])
-            st.write("**Latitude**")
-            c1, c2, c3, c4 = st.columns([1,1,1,1.5])
-            lat_dir = c1.selectbox("Dir", ["N", "S"], index=0 if st.session_state.coords["lat"] >= 0 else 1)
-            # Update final_lat based on these inputs... (omitted for brevity, same logic as before)
-            final_lat = st.session_state.coords["lat"] # Placeholder
-            final_lon = st.session_state.coords["lon"]
+        # Capture the move event
+        # 'returned_objects' tells Streamlit which map data to send back to Python
+        map_data = st_folium(m, height=500, width=None, key="fine_tune_map")
 
-        # Final EXIF Save
-        if st.button("🔥 Apply & Download", type="primary", use_container_width=True):
-            # (Piexif saving logic remains the same)
-            st.success("Saving...")
+        # Logic: If the pin was dragged, update the coordinates in the fields
+        if map_data and map_data.get("last_object_clicked"):
+            dragged_lat = map_data["last_object_clicked"]["lat"]
+            dragged_lon = map_data["last_object_clicked"]["lng"]
+            
+            # Check if the drag is different enough to warrant a state update
+            if round(dragged_lat, 6) != round(st.session_state.lat, 6):
+                st.session_state.lat = dragged_lat
+                st.session_state.lon = dragged_lon
+                st.rerun()
+
+    # --- 4. FINAL EXPORT ---
+    if st.button("🔥 Apply Fine-Tuning & Download", type="primary", use_container_width=True):
+        exif_dict = piexif.load(img.info.get('exif', b''))
+        gps_ifd = {
+            piexif.GPSIFD.GPSLatitudeRef: 'N' if st.session_state.lat >= 0 else 'S',
+            piexif.GPSIFD.GPSLatitude: decimal_to_exif_rational(st.session_state.lat),
+            piexif.GPSIFD.GPSLongitudeRef: 'E' if st.session_state.lon >= 0 else 'W',
+            piexif.GPSIFD.GPSLongitude: decimal_to_exif_rational(st.session_state.lon),
+        }
+        exif_dict["GPS"] = gps_ifd
+        exif_bytes = piexif.dump(exif_dict)
+        
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", exif=exif_bytes)
+        st.download_button("💾 Download Updated Photo", buf.getvalue(), f"fixed_{uploaded_file.name}", "image/jpeg")
